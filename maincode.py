@@ -1,33 +1,8 @@
-"""
-HARDWARE — Autonomous Robotic Sorting (Raspberry Pi)
-=====================================================
-Pipeline (matches simulation exactly):
-  OpenCV Camera
-    → YOLO Detection → Pixel Centroid
-      → Depth estimation (fixed table Z)
-        → Pixel-to-World (calibrated projection)
-          → Analytic IK  (same maths as simulation)
-            → FK Verification
-              → move_robot() → Magnet ON → Lift → Bin → Home
-
-Fixes applied vs original code:
-  1. IK cos_theta3 sign corrected  (was wrong cosine rule)
-  2. theta2 = alpha − beta         (was + beta → wrong direction)
-  3. FK verification added         (was missing entirely)
-  4. Smooth servo interpolation    (was instant jump — dangerous)
-  5. Separate x/y pixel calibration (was single scalar)
-  6. try/finally cleanup           (GPIO + camera always released)
-  7. Safe hardware init with error messages
-  8. Magnet pin active-HIGH relay assumed; change GPIO.LOW/HIGH if
-     your relay board is active-LOW
-"""
-
 import cv2
 import math
 import time
 import sys
 
-# Hardware imports — guarded so file can be syntax-checked off-Pi
 try:
     import board
     import busio
@@ -124,9 +99,7 @@ def _set_servo(servo_obj, angle_deg, name="servo"):
     angle_deg = max(0.0, min(180.0, angle_deg))
     if HW_AVAILABLE and servo_obj is not None:
         servo_obj.angle = angle_deg
-    # Always print so dry-run shows intent
-    # (suppressed in batch calls; printed by move_robot)
-
+   
 def move_robot(base_deg, shoulder_deg, elbow_deg, steps=20, delay=0.05):
     """
     Smoothly interpolate all three servos to target angles.
@@ -166,16 +139,7 @@ def toggle_magnet(state: bool):
 # ══════════════════════════════════════════════
 
 def inverse_kinematics(x_cm, y_cm, z_cm):
-    """
-    Analytic 3-DOF IK — identical maths to simulation.
-    Inputs in centimetres relative to arm base.
-    Returns (base_deg, shoulder_deg, elbow_deg) mapped to servo angles,
-    or None if unreachable.
-
-    Fixes vs original:
-      • cos_theta3 sign: (d²−L2²−L3²)/(2·L2·L3)   [was L2²+L3²−d²]
-      • theta2 = alpha − beta                         [was alpha + beta]
-    """
+  
     try:
         # ── Yaw (base) ──
         theta1 = math.degrees(math.atan2(y_cm, x_cm))
@@ -202,10 +166,7 @@ def inverse_kinematics(x_cm, y_cm, z_cm):
                     max(-1.0, min(1.0,
                         (L2**2 + d**2 - L3**2) / (2.0 * L2 * d)
                     ))))
-        theta2 = alpha - beta                    # FIX: was alpha + beta
-
-        # ── Map to servo angles ──
-        #    Adjust offsets below if your servo horn is mounted differently
+        theta2 = alpha - beta                   
         servo_base     = 90.0 + theta1           # 90° = centre/forward
         servo_shoulder = 90.0 - theta2           # 90° = arm horizontal
         servo_elbow    = 180.0 - theta3          # 180° = arm straight
@@ -286,10 +247,6 @@ def main():
                 print("[WARN] Frame read failed — retrying ...")
                 time.sleep(0.1)
                 continue
-
-            # ┌──────────────────────────────────────────────┐
-            # │ STEP 1 — YOLO detection                      │
-            # └──────────────────────────────────────────────┘
             results = model(frame, stream=True, verbose=False)
 
             detections = []
@@ -314,25 +271,14 @@ def main():
 
                     detections.append((cx, cy, conf, label))
 
-            # ┌──────────────────────────────────────────────┐
-            # │ STEP 2 — Pick first detection                │
-            # └──────────────────────────────────────────────┘
             if detections:
                 u, v, conf, label = detections[0]
 
                 print(f"{'─'*55}")
                 print(f"  [YOLO]      {label}  conf={conf:.2f}  centroid=({u},{v})")
-
-                # ┌────────────────────────────────────────────┐
-                # │ STEP 3 — Pixel → World                     │
-                # └────────────────────────────────────────────┘
                 x_cm, y_cm, z_cm = pixel_to_world_cm(u, v)
                 print(f"  [Unproject] pixel ({u},{v})")
                 print(f"              → World  X={x_cm:.2f}  Y={y_cm:.2f}  Z={z_cm:.2f} cm")
-
-                # ┌────────────────────────────────────────────┐
-                # │ STEP 4 — Analytic IK                       │
-                # └────────────────────────────────────────────┘
                 angles = inverse_kinematics(x_cm, y_cm, HOVER_Z_CM)
                 print(f"  [IK]        target Z={HOVER_Z_CM} cm (hover)")
 
@@ -346,10 +292,6 @@ def main():
                 b_deg, s_deg, e_deg = angles
                 print(f"              → Base={b_deg:.1f}°  "
                       f"Shld={s_deg:.1f}°  Elbw={e_deg:.1f}°")
-
-                # ┌────────────────────────────────────────────┐
-                # │ STEP 5 — FK Verification                   │
-                # └────────────────────────────────────────────┘
                 fk_x, fk_y, fk_z = forward_kinematics(b_deg, s_deg, e_deg)
                 fk_err = math.sqrt((fk_x - x_cm)**2 +
                                    (fk_y - y_cm)**2 +
@@ -365,10 +307,6 @@ def main():
                         break
                     continue
                 print("✔")
-
-                # ┌────────────────────────────────────────────┐
-                # │ STEP 6 — Pickup sequence                   │
-                # └────────────────────────────────────────────┘
                 print("  [Sequence]  Starting pickup ...")
 
                 # A. Approach (hover above target)
@@ -415,7 +353,6 @@ def main():
         print("\nInterrupted by user.")
 
     finally:
-        # ── Always clean up ──
         print("\n[Cleanup] Releasing resources ...")
         if cap is not None and cap.isOpened():
             cap.release()
@@ -431,4 +368,5 @@ def main():
         print("[Cleanup] Done.")
 
 if __name__ == "__main__":
+
     main()
